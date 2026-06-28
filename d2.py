@@ -460,7 +460,7 @@ def launchplayer(player_select):
             ' ! h264parse config-interval=-1'
             ' ! v4l2h264dec capture-io-mode=4'
             ' ! queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream'
-            ' ! kmssink sync=true max-lateness=20000000 qos=true driver-name=vc4'
+            ' ! kmssink sync=false driver-name=vc4'
             ' d. ! queue max-size-buffers=4 max-size-bytes=0 max-size-time=80000000 leaky=downstream'
             ' ! decodebin'
             ' ! audioconvert'
