@@ -21,8 +21,12 @@ while True:
     cc = pkt[0] & 0x0F
     hlen = 12 + cc * 4
     if pkt[0] & 0x10:  # extension bit set
+        if len(pkt) < hlen + 4:  # need the 4-byte extension header
+            continue
         ext_words = struct.unpack_from('>H', pkt, hlen + 2)[0]
         hlen += 4 + ext_words * 4
+    if len(pkt) <= hlen:  # malformed/truncated packet, no payload
+        continue
     try:
         out.write(pkt[hlen:])
         out.flush()
