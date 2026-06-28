@@ -243,11 +243,11 @@ else:
     msg = msg + 'wfd_audio_codecs: AAC 00000001 00\r\n'
 
 if disable_1920_1080_60fps == 1:
-    # CEA 00000420 = bits 5+10: 1280x720p30 + 1280x720p25 only
-    # VESA/HH zeroed: prevent Samsung falling back to high-res VESA/HH modes
-    # level 01 = H.264 Level 3.1 only: incapable of 1080p, caps at ~720p30
-    # max-hres/max-vres = 1280x720 hard limit
-    msg = msg + 'wfd_video_formats: 00 00 02 01 00000420 00000000 00000000 00 0000 0000 00 0500 02D0\r\n'
+    # CEA 00000080 = bit 7: 1920x1080p30 only
+    # level 04 = H.264 Level 4.0: required for 1080p30
+    # VESA/HH zeroed: prevent fallback to unexpected resolutions
+    # max-hres/max-vres = none: no hard cap
+    msg = msg + 'wfd_video_formats: 00 00 02 04 00000080 00000000 00000000 00 0000 0000 00 none none\r\n'
 else:
     msg = msg + 'wfd_video_formats: 00 00 02 10 0001FFFF 3FFFFFFF 00000FFF 00 0000 0000 00 none none\r\n'
 
@@ -429,23 +429,35 @@ def launchplayer(player_select):
     if display_power_management == 1:
         os.system('vcgencmd display_power 1')
     if player_select == 0:
-        # rtp_recv.py binds UDP 1028 instantly and strips RTP headers, piping raw
-        # MPEG-TS to mpv.  rtp:// URL and ffmpeg -i rtp:// both delay socket binding.
-        # GStreamer pipeline: udpsrc handles RTP directly, tsdemux latency=100
-        # overrides the 700ms MPEG-TS default, leaky queues drop old frames to
-        # prevent delay accumulation, kmssink sync=false ignores timestamps entirely.
+        # Queue strategy: no leaking BEFORE the decoder (dropping a frame before
+        # decode corrupts all subsequent P-frames until the next IDR).  Only leak
+        # AFTER decode, so the display always shows the freshest decoded frame.
+        # h264parse config-interval=-1: insert SPS/PPS before every IDR so the
+        # decoder can resync immediately after any packet-loss event.
         os.system(
             'gst-launch-1.0 -e'
             ' udpsrc port=1028'
             ' ! "application/x-rtp,media=video,payload=(int)33,clock-rate=(int)90000,encoding-name=MP2T"'
             ' ! rtpmp2tdepay'
             ' ! tsdemux name=d latency=100'
-            ' d. ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream'
-            ' ! h264parse'
+            ' d. ! queue max-size-buffers=5 max-size-bytes=0 max-size-time=0'
+            ' ! h264parse config-interval=-1'
             ' ! v4l2h264dec capture-io-mode=4'
-            ' ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream'
+            ' ! queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream'
             ' ! kmssink sync=false driver-name=vc4'
             ' 2>/tmp/gst.log &')
+        # Ask Samsung for a fresh IDR frame so the decoder starts clean
+        sleep(0.3)
+        try:
+            msg = 'wfd_idr_request\r\n'
+            idrreq = ('SET_PARAMETER rtsp://localhost/wfd1.0 RTSP/1.0\r\n'
+                      'CSeq: ' + str(csnum) + '\r\n'
+                      'Content-Type: text/parameters\r\n'
+                      'Content-Length: ' + str(len(msg)) + '\r\n\r\n' + msg)
+            sock.sendall(idrreq.encode())
+            print('[launchplayer] sent wfd_idr_request')
+        except Exception as e:
+            print('[launchplayer] IDR request failed:', e)
     elif player_select == 1:
         os.system('./player/player.bin '+str(idrsockport)+' '+str(sound_output_select)+' &')
     elif player_select == 2:
