@@ -1,0 +1,146 @@
+#!/bin/bash
+export DISPLAY=:0
+export XAUTHORITY=/home/aphoenix/.Xauthority
+WPACTL=/tmp/lazycast_wpa
+
+cleanup() {
+    echo "Cleaning up..."
+    pkill vlc cvlc 2>/dev/null
+    sudo pkill -f "busybox.*udhcpd" 2>/dev/null
+    sudo pkill -f "dnsmasq.*lazycast" 2>/dev/null
+    sudo pkill -f "wpa_supplicant.*lazycast_wpa" 2>/dev/null
+    sleep 2
+    sudo systemctl start wpa_supplicant
+    sleep 2
+    sudo systemctl start NetworkManager &
+    echo "WiFi restoring..."
+}
+trap cleanup EXIT INT TERM
+
+echo "Stopping system wpa_supplicant to free wlan0..."
+nmcli device set wlan0 managed no 2>/dev/null
+sudo systemctl stop wpa_supplicant
+sleep 2
+
+mkdir -p $WPACTL
+cat > /tmp/wpa_p2p.conf << 'EOF'
+ctrl_interface=/tmp/lazycast_wpa
+ctrl_interface_group=netdev
+update_config=1
+p2p_go_intent=15
+persistent_reconnect=1
+EOF
+
+echo "Starting P2P wpa_supplicant..."
+sudo wpa_supplicant -B -iwlan0 -c/tmp/wpa_p2p.conf -Dnl80211
+sleep 3
+
+if ! wpa_cli -p$WPACTL ping 2>/dev/null | grep -q PONG; then
+    echo "ERROR: wpa_supplicant not responding on $WPACTL"
+    exit 1
+fi
+
+echo "wpa_supplicant ready"
+wpa_cli -p$WPACTL interface
+
+while :
+do
+    p2pdev=$(wpa_cli -p$WPACTL interface 2>/dev/null | grep "p2p-dev" | tail -1)
+    echo "P2P dev interface: '$p2pdev'"
+
+    # Check if group already exists via ip link (more reliable than wpa_cli)
+    p2piface=$(ip link show 2>/dev/null | grep -oE 'p2p-wlan[0-9]+-[0-9]+' | head -1)
+
+    if [ -n "$p2piface" ]; then
+        echo "P2P group already up on $p2piface"
+    else
+        echo "Creating P2P group..."
+        wpa_cli -p$WPACTL -i"$p2pdev" p2p_find type=progressive
+        wpa_cli -p$WPACTL -i"$p2pdev" set device_name "$(uname -n)"
+        wpa_cli -p$WPACTL -i"$p2pdev" set device_type 7-0050F204-1
+        wpa_cli -p$WPACTL -i"$p2pdev" set p2p_go_ht40 1
+        wpa_cli -p$WPACTL -i"$p2pdev" wfd_subelem_set 0 000600111c44012c
+        wpa_cli -p$WPACTL -i"$p2pdev" wfd_subelem_set 1 0006000000000000
+        wpa_cli -p$WPACTL -i"$p2pdev" wfd_subelem_set 6 000700000000000000
+
+        perentry=$(wpa_cli -p$WPACTL -i"$p2pdev" list_networks 2>/dev/null | grep "\[DISABLED\]\[P2P-PERSISTENT\]" | tail -1)
+        if echo "$perentry" | grep -q "P2P-PERSISTENT"; then
+            networkid=${perentry%%D*}
+            perstr="=$networkid"
+        else
+            perstr=""
+        fi
+
+        while [ -z "$p2piface" ]; do
+            result=$(wpa_cli -p$WPACTL p2p_group_add -i"$p2pdev" persistent$perstr 2>/dev/null)
+            echo "p2p_group_add: $result"
+            sleep 3
+            p2piface=$(ip link show 2>/dev/null | grep -oE 'p2p-wlan[0-9]+-[0-9]+' | head -1)
+        done
+    fi
+
+    echo "P2P group interface: $p2piface"
+
+    sudo ip addr add 192.168.173.1/24 dev "$p2piface" 2>/dev/null || true
+    sudo ip link set "$p2piface" up
+
+    # Start dnsmasq as DHCP server on the P2P interface
+    sudo pkill -f "dnsmasq.*lazycast" 2>/dev/null
+    sleep 1
+    sudo dnsmasq --interface="$p2piface" --bind-dynamic \
+        --dhcp-range=192.168.173.50,192.168.173.150,255.255.255.0,1h \
+        --dhcp-authoritative --port=0 --no-resolv --no-hosts \
+        --pid-file=/tmp/lazycast_dnsmasq.pid \
+        --dhcp-leasefile=/tmp/lazycast_dnsmasq.leases \
+        --log-facility=/tmp/lazycast_dnsmasq.log --log-dhcp
+    echo "dnsmasq started: $(cat /tmp/lazycast_dnsmasq.pid 2>/dev/null)"
+    sleep 1
+
+    echo ">>> Display ready — open Smart View and tap 'raspberrypi' <<<"
+
+    while :
+    do
+        echo "Enabling WPS push-button on $p2piface..."
+        sudo wpa_cli -p$WPACTL -i"$p2piface" wps_pbc
+
+        echo "Waiting up to 60s for phone to connect..."
+        connected=0
+        for i in $(seq 1 30); do
+            stations=$(sudo wpa_cli -p$WPACTL -i"$p2piface" all_sta 2>/dev/null)
+            if echo "$stations" | grep -qE '([0-9a-f]{2}:){5}[0-9a-f]{2}'; then
+                echo "Phone associated!"
+                connected=1
+                break
+            fi
+            sleep 2
+        done
+
+        if [ $connected -eq 1 ]; then
+            echo "Waiting for phone to get an IP via DHCP..."
+            phone_ip=""
+            for j in $(seq 1 20); do
+                phone_ip=$(awk '{print $3}' /tmp/lazycast_dnsmasq.leases 2>/dev/null | head -1)
+                if [ -z "$phone_ip" ]; then
+                    phone_ip=$(ip neigh show dev "$p2piface" 2>/dev/null | grep -v FAILED | grep REACHABLE | awk '{print $1}' | grep -v '^192\.168\.173\.1$' | head -1)
+                fi
+                [ -n "$phone_ip" ] && break
+                sleep 1
+            done
+            echo "Phone IP: $phone_ip"
+            echo "Leases: $(cat /tmp/lazycast_dnsmasq.leases 2>/dev/null)"
+            if [ -z "$phone_ip" ]; then
+                echo "WARNING: phone got no IP — DHCP failed. Last dnsmasq log lines:"
+                tail -8 /tmp/lazycast_dnsmasq.log 2>/dev/null
+                phone_ip=192.168.173.80
+            fi
+            ./d2.py "$phone_ip" 2>&1
+        else
+            echo "Timeout — re-enabling WPS..."
+        fi
+
+        if ! ip link show 2>/dev/null | grep -q "$p2piface"; then
+            echo "P2P interface gone, restarting outer loop..."
+            break
+        fi
+    done
+done
