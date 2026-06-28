@@ -36,7 +36,7 @@ player_select = 2
 # 1: player1 has lower latency.
 # 2: player2 handles still images and sound better.
 # 3: omxplayer # Using this option for video playback on Android
-sound_output_select = 2
+sound_output_select = 0
 # 0: HDMI sound output
 # 1: 3.5mm audio jack output
 # 2: alsa
@@ -191,10 +191,24 @@ def hidcprocessing(hidcsock):
 
 
 
-cpuinfo = os.popen('grep Hardware /proc/cpuinfo')
+cpuinfo = os.popen('grep -E "^(Hardware|Model)" /proc/cpuinfo')
 cpustr = cpuinfo.read()
-runonpi = 'BCM2835' in cpustr or 'BCM2711' in cpustr
 cpuinfo.close()
+modelstr = ''
+try:
+    with open('/proc/device-tree/model', 'r') as modelfile:
+        modelstr = modelfile.read()
+except OSError:
+    pass
+runonpi = (
+    'BCM2835' in cpustr or
+    'BCM2711' in cpustr or
+    'Raspberry Pi' in cpustr or
+    'Raspberry Pi' in modelstr
+)
+if runonpi and player_select in (1, 2) and not os.path.exists('./h264/h264.bin'):
+    print('Native Raspberry Pi player not built; using GStreamer player')
+    player_select = 0
 
 if runonpi and not os.path.exists('edid.txt'):
     os.system('tvservice -d edid.txt')
@@ -371,7 +385,8 @@ if usehidc:
 
 
 def killall(control):
-        os.system('pkill -9 gst-launch-1.0 2>/dev/null; pkill -9 mpv 2>/dev/null; pkill -9 ffmpeg 2>/dev/null; pkill -f rtp_recv.py 2>/dev/null')
+        os.system('pkill -9 gst-launch-1.0 2>/dev/null; pkill -9 mpv 2>/dev/null; pkill -9 ffmpeg 2>/dev/null; pkill -f rtp_recv.py 2>/dev/null; pkill -f lpcm_extract.py 2>/dev/null; pkill -f "aplay.*plughw:CARD=b1,DEV=0" 2>/dev/null')
+        os.system('amixer -c b1 sset PCM mute >/dev/null 2>&1')
         sleep(0.1)
         os.system('pkill ffplay')
         os.system('pkill vlc')
@@ -434,17 +449,24 @@ def launchplayer(player_select):
         # AFTER decode, so the display always shows the freshest decoded frame.
         # h264parse config-interval=-1: insert SPS/PPS before every IDR so the
         # decoder can resync immediately after any packet-loss event.
+        os.system('amixer -c b1 sset PCM unmute >/dev/null 2>&1')
         os.system(
             'gst-launch-1.0 -e'
             ' udpsrc port=1028'
             ' ! "application/x-rtp,media=video,payload=(int)33,clock-rate=(int)90000,encoding-name=MP2T"'
             ' ! rtpmp2tdepay'
-            ' ! tsdemux name=d latency=100'
+            ' ! tsdemux name=d latency=30'
             ' d. ! queue max-size-buffers=5 max-size-bytes=0 max-size-time=0'
             ' ! h264parse config-interval=-1'
             ' ! v4l2h264dec capture-io-mode=4'
             ' ! queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream'
-            ' ! kmssink sync=false driver-name=vc4'
+            ' ! kmssink sync=true max-lateness=20000000 qos=true driver-name=vc4'
+            ' d. ! queue max-size-buffers=4 max-size-bytes=0 max-size-time=80000000 leaky=downstream'
+            ' ! decodebin'
+            ' ! audioconvert'
+            ' ! audioresample'
+            ' ! queue max-size-buffers=4 max-size-bytes=0 max-size-time=80000000 leaky=downstream'
+            ' ! alsasink device=default:CARD=b1 sync=true buffer-time=50000 latency-time=10000 max-lateness=20000000 qos=true'
             ' 2>/tmp/gst.log &')
         # Ask Samsung for a fresh IDR frame so the decoder starts clean
         sleep(0.3)
