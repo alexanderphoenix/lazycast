@@ -452,8 +452,9 @@ def launchplayer(player_select):
         os.system('amixer -c b1 sset PCM unmute >/dev/null 2>&1')
         os.system(
             'gst-launch-1.0 -e'
-            ' udpsrc port=1028'
+            ' udpsrc port=1028 buffer-size=4194304'
             ' ! "application/x-rtp,media=video,payload=(int)33,clock-rate=(int)90000,encoding-name=MP2T"'
+            ' ! rtpjitterbuffer latency=50 drop-on-latency=false do-lost=true faststart-min-packets=2'
             ' ! rtpmp2tdepay'
             ' ! tsdemux name=d latency=30'
             ' d. ! queue max-size-buffers=5 max-size-bytes=0 max-size-time=0'
@@ -466,7 +467,7 @@ def launchplayer(player_select):
             ' ! audioconvert'
             ' ! audioresample'
             ' ! queue max-size-buffers=4 max-size-bytes=0 max-size-time=80000000 leaky=downstream'
-            ' ! alsasink device=default:CARD=b1 sync=true buffer-time=50000 latency-time=10000 max-lateness=20000000 qos=true'
+            ' ! alsasink device=default:CARD=b1 sync=false buffer-time=80000 latency-time=10000'
             ' 2>/tmp/gst.log &')
         # Ask Samsung for a fresh IDR frame so the decoder starts clean
         sleep(0.3)
