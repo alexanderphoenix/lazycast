@@ -10,6 +10,7 @@ exec > >(stdbuf -oL tee -a /var/log/lazycast.log) 2>&1
 echo "=== lazycast $(date) ==="
 
 cleanup() {
+    trap - EXIT INT TERM
     echo "--- Stopping ---"
     pkill ffplay 2>/dev/null
     sudo kill "$(cat /tmp/lazycast_dnsmasq.pid 2>/dev/null)" 2>/dev/null
@@ -18,7 +19,14 @@ cleanup() {
     sudo ip addr del 192.168.173.1/24 dev wlan0 2>/dev/null
     echo "Done."
 }
-trap cleanup EXIT INT TERM
+
+shutdown() {
+    cleanup
+    exit 0
+}
+
+trap cleanup EXIT
+trap shutdown INT TERM
 
 # Wait for wpa_supplicant to be available.
 # Use -iwlan0 explicitly: the p2p-wlan0-X group socket is root:root and

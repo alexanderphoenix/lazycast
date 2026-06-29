@@ -1,127 +1,285 @@
-lazycast: A Simple Wireless Display Receiver
+# lazycast Raspberry Pi Smart View receiver
 
-# Description
-lazycast is a simple wifi display receiver. It was originally targeted Raspberry Pi (as display) and Windows 8.1/10 (as source), but it **might** also work on other Linux platforms and Miracast sources. (For other Linux systems, skip the preparation section. For video playback from Android sources, modify the ``player_select`` option in ``d2.py``.) For Windows 10 systems, the Miracast over Infrastructure (**MICE**) feature is also supported, which may provide better user experiences. In general, lazycast does not require re-compilation of wpa_supplicant to support various p2p functionalities, and should work on an "out of the box" Raspberry Pi.
+This fork is configured as a Miracast/Wi-Fi Display receiver for a Raspberry Pi,
+tested with Samsung Smart View from a Galaxy S24 Ultra. It creates a Wi-Fi
+Direct group, gives the phone an address with `dnsmasq`, negotiates the WFD
+stream over RTSP, and plays the received MPEG-TS stream with GStreamer.
 
-# OS
-Select "**Raspberry Pi OS (Legacy, 32-bit)** A port of Debian Bullseye with security updates and desktop environment" when flashing the SD card. Debian Bookworm seems to cause some issues.
+The project is based on Hsun-Wei Cho's original
+[`homeworkc/lazycast`](https://github.com/homeworkc/lazycast). Most of the WFD
+negotiation and control flow comes from that work; this fork's README documents
+the current Raspberry Pi deployment path used here.
 
-On a fresh OS, install ``cmake``:
+## Hardware
+
+Known working target:
+
+- Raspberry Pi 3 Model B Rev 1.2
+- Raspberry Pi Wi-Fi used for Wi-Fi Direct/P2P
+- HDMI display/audio output
+- Stable 5 V power supply
+
+Use a good power supply and cable. If the Pi reports undervoltage or throttling,
+Miracast playback can stutter:
+
+```sh
+vcgencmd get_throttled
 ```
-sudo apt install cmake
+
+`throttled=0x0` is ideal. Values such as `0x50005` indicate undervoltage and
+previous/current throttling. Also avoid placing unshielded HDMI displays or
+portable monitors directly on the Pi; that can introduce audible interference.
+
+## Operating system
+
+Use Raspberry Pi OS with normal kernel Wi-Fi Direct support. This fork has been
+used on a modern Raspberry Pi OS image where the legacy `/opt/vc` OpenMAX build
+environment is not present. The current Samsung path does not require compiling
+the legacy in-tree players.
+
+Enable SSH if you want to administer the Pi remotely.
+
+## Install packages
+
+```sh
+sudo apt update
+sudo apt install -y \
+  git python3 \
+  wpasupplicant wireless-tools iw \
+  dnsmasq tcpdump \
+  gstreamer1.0-tools \
+  gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-libav \
+  alsa-utils
 ```
-Clone the Raspberry Pi userland repo and run ``buildme``:
-```
-git clone https://github.com/raspberrypi/userland
-cd userland
-./buildme
-```
-Replace ``vc4-kms-v3d`` with ``vc4-fkms-v3d`` in ``/boot/config.txt``:
-```
-sudo sed -i 's/vc4-kms-v3d/vc4-fkms-v3d/g' /boot/config.txt
-```
-Then reboot:
-```
-sudo reboot
-```
-(You can see [this post](https://github.com/homeworkc/lazycast/issues/100#issuecomment-1003732280) for more details.)
-## Build Binaries
-Install packages (for compiling the players):
-```
-sudo apt install libx11-dev libasound2-dev libavformat-dev libavcodec-dev python3-evdev
-```
-Compile libraries on Pi:
-```
-cd /opt/vc/src/hello_pi/libs/ilclient/
-sudo make
-cd /opt/vc/src/hello_pi/hello_video
-sudo make
-```
-Clone this repo (to a desired directory):
-```
-cd ~/
-git clone https://github.com/homeworkc/lazycast
-```
-Go to the ``lazycast`` directory and then ``make``:
-```
+
+The AAC audio path needs a GStreamer AAC decoder. On the tested Pi this is
+provided by `faad`/GStreamer plugins from the packages above.
+
+## Clone this fork
+
+```sh
+cd /home/pi
+git clone https://github.com/alexanderphoenix/lazycast.git
 cd lazycast
-make
 ```
 
-# Usage
-Run `./all.sh` to start lazycast receiver. Wait until the "The display is ready" message. The name of the display will appear after this message. Then, search for this name on the source device you want to cast. The default PIN number is ``31415926``. 
+If you use a different user or directory, adjust the paths in the examples
+below.
 
-It is recommended to stop casting by the controls on the source (e.g., the PC) side.
+`all.sh` uses `sudo` for Wi-Fi Direct setup, interface configuration, `dnsmasq`,
+and packet capture. Manual runs need sudo access. The systemd example below runs
+as a system service, so those commands run as root.
 
-# Tips
-Set the resolution on the source side. lazycast advertises all possible resolutions regardless of the current rendering resolution. Therefore, you may want to change the resolution (on the source) to match the actual resolution of the display connecting to Pi.  
+## Wi-Fi setup
 
-Modify parameters in the "settings" section in ``d2.py`` to change the sound output port (hdmi/3.5mm) and preferred player.  
+`all.sh` expects `wpa_supplicant` to be running and reachable at
+`/run/wpa_supplicant`. On many Raspberry Pi OS installs this is already true.
+Check with:
 
-The maximum resolutions supported are 1920x1080p60 and 1920x1200p30. The GPU on Pi may struggle to handle 1920x1080p60, which results in high latency. In this case, reduce the FPS to 1920x1080p50.  
-
-To change the default PIN number, replace the string ``31415926`` in ``all.sh`` to another 8-digit number.  
-
-You can hide Pi's cursor by using ``unclutter -idle 3``. See [this post](https://forums.raspberrypi.com/viewtopic.php?t=234879#p1437648).
-
-After Pi connects to the source, it has an IP address of ``192.168.173.1`` and this connection can be reused for other purposes like SSH. On the other hand, since they are under the same subnet, precautions should be taken to prevent unauthorized access to Pi by anyone who knows the PIN number.    
-
-Two in-house players are written for Raspberry Pi 3. VLC, omxplayer or gstreamer can be used instead on other platforms. (See [here](https://gstreamer.freedesktop.org/documentation/installing/on-linux.html) for details of installing gstreamer.) 
-
-**It is very important that no background WiFi scanning occurs during casting. On Raspberry Pi, lazycast will automatically disable ``lxpanel`` during casting (in order to stop the ``lxplug-network`` plugin from scanning the network), and re-enable ``lxpanel`` after the casting is terminated. You may want to disable ``wlan0`` completely (``sudo ifconfig wlan0 down``) especially if ``wlan0`` is not currently connected to any network (and periodic scanning will be triggered in such a case). You can double-check that no background WiFi scanning happens by running ``iw event`` in a second terminal (and no event should be shown). [This post](https://forums.raspberrypi.com/viewtopic.php?t=250729#p1772473) has more information.**
-
-
-To redirect mouse and keyboard inputs on Pi, first install evdev (``pip install evdev``) and then set ``enable_mouse_keyboard`` to ``1`` in ``d2.py``. You also need to allow mouse and keyboard inputs on the PC.
-
-# Known issues
-lazycast tries to remember the pairing credentials so that entering the PIN is only needed once for each device. However, this feature does not seem to work properly all the time with recent Raspbian images. Therefore, re-pairing may be needed after every Raspberry Pi reboot. Try clearing the 'lazycast' information on the source device before re-pairing if you run into pairing problems.  
-
-Player2 seems to have a double-free bug which causes it to crash when playing some videos. Currently a workaround (that constantly monitors the liveliness of player2) is implemented.
-
-Latency: Limited by the implementation of the rtp player used. (In VLC, latency can be reduced from 1200 to 300ms by lowering the network cache value.)  
-
-Due to the overcrowded nature of the wifi spectrum and the use of unreliable rtp transmission, you may experience some video glitching/audio stuttering. The in-house players employ several mechanisms to conceal transmission error, but it may still be noticeable in challenging wireless environments. Interference from other devices may cause disconnections.  
-
-Devices may not fully support backchannel control and some keystrokes/clicks will behave differently. 
-
-HDCP(content protection): Neither the key nor the hardware is available on Pi and therefore is not supported.  
-
-<!-- Some Windows 10 devices seem to disconnect shortly after a connection is established. You can try using ``win10debug.sh`` instead of ``all.sh`` and see if it helps. -->
-
-# Start on boot
-
-Append this line to ``/etc/xdg/lxsession/LXDE-pi/autostart``:
-```
-@lxterminal -l --working-directory=<absolute path of lazycast> -e ./all.sh
-```
-For example, if lazycast is placed under ``~/`` (which is ``/home/pi/``, if your username is ``pi``), append the following line to the file:
-```
-@lxterminal -l --working-directory=/home/pi/lazycast -e ./all.sh
+```sh
+wpa_cli -p/run/wpa_supplicant -iwlan0 ping
 ```
 
-# Miracast over Infrastructure
+Expected output:
 
-For Windows 10 sources, Miracast over Infrastructure (MICE) is a feature that allows transmission of screen data over Ethernet or secure wifi networks. The spec of Miracast over Infrastructure (MICE) is available [here](https://winprotocoldoc.blob.core.windows.net/productionwindowsarchives/MS-MICE/%5bMS-MICE%5d.pdf). Compared to wifi p2p, it allows stabler connection and lower latency. Although MICE relies on Ethernet or secure wifi network almost entirely, in the device discovery phase, it still requires a wifi p2p device to broadcast beacon and probe response frames to the source. (However, it might be possible to use two Pis so that one of the two does not need to have wifi hardware or be physically close to the source. One Pi would be used to trasmit the beacon while the other (that runs ``./project.py``) is used to project. For such setting to work, the variable ``hostname`` in ``mice.py`` must be set to the hostname of the machine running ``project.py``. In the future, it might be possible to emulate a wifi card by HW/SW on the source so that wifi p2p will not be necessary.)  
-
-Currently, this feature is tested to be working with a Windows 10 PC and a Pi (with manually assigned IPs) connected via Ethernet. More tests might be needed, especially for different DHCP, DNS and firewall configurations. Ports used include but are not limited to UDP 53 (DNS), UDP 5353 (mDNS), TCP 7236 and TCP 7250. Also, the encryption feature is not implemented yet so it should only be used over trusted networks and it should not be used for sensitive data. MICE works in ipv6 networks but currently only ipv4 is implemented.  
-
-## Preparation
-Install avahi-utils:
+```text
+PONG
 ```
-sudo apt install avahi-utils
+
+If it is not running:
+
+```sh
+sudo systemctl enable --now wpa_supplicant@wlan0.service
 ```
-Make sure the Windows 10 PC is on the same network as the Pi. You can try pinging the Pi from the PC.  
-NetworkManager is **not** required for this version of MICE. However, using MICE will disable the built-in WiFi UI. (To restore the built-in WiFi UI after MICE, either run ``resetwpa.sh`` or simply reboot.)   
-## Usage
-Make sure there is no p2p interface that has already been created and ``all.sh`` is not running. (Make sure ``all.sh`` does not start on boot and then simply reboot.)  
 
-Run ``./mice.sh``.  
+Do not run NetworkManager or other Wi-Fi managers that fight `wpa_supplicant`
+for control of `wlan0` while casting. Background scanning can cause glitches.
 
-Use the "Connect" tab in Windows 10 and try to connect to the hostname of Pi (e.g., raspberrypi). Windows may try to connect using the traditional method first and therefore may ask for PIN. In that case, simply cancel the connecting process and try again. Since no encryption is implemented at the moment, the prompt for PIN should not appear using MICE.  
+## Run manually
 
-Windows 10 assigns the name of the display differently when using MICE. If the monitor connected to the Pi is successfully detected by the PC, the name of the display (e.g., raspberrypi) will be changed to the name of the monitor. If the detection fails, the name of the display will be changed to "Device". After disconnection, the name of the display will be changed back to the hostname of Pi (e.g., raspberrypi).  
+From the repository directory:
 
-If you wish to run MICE and wifi p2p simultaneously, set the parameter ``concurrent`` to ``1`` in ``newmice.py`` and only uses ``mice.sh``. When there are multiple IPs assigned to the Pi and mDNS does not seem to be working, manually set the ``ipstr`` variable in ``newmice.py`` to the target IP of Pi and a PC will try to connect to this IP directly.  
-# Others
-Some parts of the video player1 are modified from the codes on https://github.com/Apress/raspberry-pi-gpu-audio-video-prog. Many thanks to the author of "Raspberry Pi GPU Audio Video Programming" and, by extension, authors of omxplayer.  
-Using any part of the codes in this project in commercial products is prohibited.
+```sh
+./all.sh
+```
+
+Wait for:
+
+```text
+>>> READY — open Smart View on Samsung and tap '<hostname>' <<<
+```
+
+Then open Smart View on the Samsung phone and select the Pi hostname.
+This Samsung path uses WPS push-button mode. The original lazycast PIN
+`31415926` is still present in legacy scripts, but Samsung Smart View did not
+associate reliably with the fixed PIN flow on the tested setup.
+
+Logs are written to:
+
+```text
+/var/log/lazycast.log
+/tmp/gst.log
+/tmp/lazycast_dnsmasq.log
+```
+
+The Pi uses:
+
+- `192.168.173.1/24` for the Wi-Fi Direct network
+- DHCP range `192.168.173.50` to `192.168.173.150`
+- RTP/UDP port `1028`
+- RTSP/TCP port `7236` on the phone side
+
+## Run on boot with systemd
+
+Create a system service for the checkout path you used. For `/home/pi/lazycast`:
+
+```ini
+[Unit]
+Description=lazycast Smart View receiver
+After=network.target wpa_supplicant@wlan0.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/lazycast
+ExecStart=/home/pi/lazycast/all.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+One way to install that unit is:
+
+```sh
+sudo tee /etc/systemd/system/lazycast.service >/dev/null <<'EOF'
+[Unit]
+Description=lazycast Smart View receiver
+After=network.target wpa_supplicant@wlan0.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/lazycast
+ExecStart=/home/pi/lazycast/all.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now lazycast.service
+```
+
+Watch logs:
+
+```sh
+sudo journalctl -u lazycast.service -f
+tail -f /var/log/lazycast.log
+```
+
+The service runs independently of user login. It is fine to disable Raspberry Pi
+auto-login and boot to the CLI, provided `lazycast.service` is enabled.
+
+## Current playback path
+
+For Samsung Smart View this fork uses the GStreamer path in `d2.py`:
+
+- WFD audio is advertised as AAC.
+- RTP MPEG-TS is received on UDP `1028`.
+- `rtpjitterbuffer` smooths Wi-Fi packet timing.
+- H.264 video is decoded with `v4l2h264dec` and displayed with `kmssink`.
+- AAC audio is decoded by GStreamer and played to HDMI ALSA (`default:CARD=b1`).
+
+The pipeline is tuned for 1080p at approximately 25-30 fps on a Pi 3. It avoids
+dropping compressed H.264 before decode, which helps prevent visible artifacts
+during fast motion.
+
+## Troubleshooting
+
+### Smart View cannot find or connect to the Pi
+
+Check that `all.sh` printed the READY message, then inspect:
+
+```sh
+ip link show
+wpa_cli -p/run/wpa_supplicant interface
+sudo journalctl -u wpa_supplicant@wlan0.service --no-pager -n 100
+tail -100 /var/log/lazycast.log
+```
+
+If a stale P2P interface exists, restart the service or reboot.
+
+### Phone connects but no video appears
+
+Check whether GStreamer failed:
+
+```sh
+cat /tmp/gst.log
+ps -ef | grep gst-launch
+```
+
+Confirm the needed GStreamer elements exist:
+
+```sh
+gst-inspect-1.0 rtpjitterbuffer rtpmp2tdepay tsdemux h264parse v4l2h264dec kmssink faad alsasink
+```
+
+### Audio missing
+
+Confirm HDMI audio exists:
+
+```sh
+aplay -l
+amixer -c b1 sget PCM
+```
+
+The expected HDMI card on the tested Pi is `bcm2835 HDMI 1`, ALSA card `b1`.
+If your card name differs, update the `alsasink device=` value in `d2.py`.
+
+### Stutter or brief freezes
+
+First check power:
+
+```sh
+vcgencmd get_throttled
+vcgencmd measure_temp
+```
+
+Undervoltage/throttling is a common cause of periodic stutter on Pi 3. Use a
+better power supply/cable before chasing pipeline settings.
+
+Also keep the phone close to the Pi and avoid other Wi-Fi traffic/scanning on
+the Pi during casting.
+
+### Buzzing or noise
+
+If buzzing continues after casting stops, confirm no playback process is alive:
+
+```sh
+ps -ef | grep -E 'gst-launch|d2.py|aplay'
+fuser -v /dev/snd/*
+```
+
+Mute HDMI audio manually:
+
+```sh
+amixer -c b1 sset PCM mute
+```
+
+If the noise is physical interference, move the display, HDMI cable, or audio
+amplifier away from the Pi.
+
+## Notes
+
+- HDCP is not supported.
+- Pairing persistence can vary by phone/OS. If connection attempts become
+  confused, forget the display on the phone and restart `lazycast`.
+- The legacy native players under `player/` and `h264/` are retained from the
+  original project, but this fork's Samsung path currently uses GStreamer.
+- Miracast over Infrastructure files from the original project remain in the
+  repo, but they are not part of the deployment path documented here.
